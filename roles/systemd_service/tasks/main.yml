@@ -1,0 +1,47 @@
+---
+- name: Ensure systemd user directory exists
+  file:
+    path: "{{ systemd_user_service_dir | expanduser }}"
+    state: directory
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Template systemd service file
+  template:
+    src: "clawdbot-gateway.service.j2"
+    dest: "{{ systemd_user_service_dir | expanduser }}/{{ systemd_user_service_name }}"
+    owner: "{{ clawdbot_user }}"
+    mode: "0644"
+
+- name: Enable lingering for user
+  become: true
+  command: "loginctl enable-linger {{ clawdbot_user }}"
+
+- name: Reload systemd user daemon
+  command: "systemctl --user daemon-reload"
+  become_user: "{{ clawdbot_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ clawdbot_user_id }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ clawdbot_user_id }}/bus"
+
+- name: Enable and start clawdbot gateway service
+  command: "systemctl --user enable --now {{ systemd_user_service_name }}"
+  become_user: "{{ clawdbot_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ clawdbot_user_id }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ clawdbot_user_id }}/bus"
+  register: service_start
+  changed_when: "'Created symlink' in service_start.stdout or 'Started' in service_start.stdout"
+
+- name: Check service status
+  command: "systemctl --user status {{ systemd_user_service_name }}"
+  become_user: "{{ clawdbot_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ clawdbot_user_id }}"
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ clawdbot_user_id }}/bus"
+  register: service_status
+  changed_when: false
+
+- name: Debug service status
+  debug:
+    msg: "Service {{ systemd_user_service_name }} is {{ service_status.rc == 0 and 'active' or 'inactive' }}"

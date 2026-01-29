@@ -1,0 +1,32 @@
+---
+- name: Create clawdbot config directory
+  file:
+    path: "{{ clawdbot_config_dir | expanduser }}"
+    state: directory
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Create clawdbot workspace directory
+  file:
+    path: "{{ clawdbot_workspace | expanduser }}"
+    state: directory
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Template clawdbot.json configuration
+  template:
+    src: "clawdbot.json.j2"
+    dest: "{{ clawdbot_config_dir | expanduser }}/clawdbot.json"
+    owner: "{{ clawdbot_user }}"
+    mode: "0644"
+
+- name: Copy additional workspace files (optional)
+  copy:
+    src: "{{ item }}"
+    dest: "{{ clawdbot_workspace | expanduser }}/"
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+  loop:
+    - "organize_downloads.sh"
+    - "test_monitor.sh"
+  when: false  # Disabled by default, enable if needed

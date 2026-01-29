@@ -1,0 +1,126 @@
+---
+# Global variables for Clawdbot Ansible deployment
+clawdbot_user: "ubuntu"
+clawdbot_user_id: 1000
+clawdbot_home: "/home/{{ clawdbot_user }}"
+
+# Node.js version
+node_version: "22.20.0"
+nvm_version: "0.40.0"
+nvm_install_dir: "{{ clawdbot_home }}/.nvm"
+
+# Clawdbot version
+clawdbot_version: "2026.1.24-3"
+clawdbot_install_dir: "{{ nvm_install_dir }}/versions/node/{{ node_version }}/lib/node_modules/clawdbot"
+clawdbot_bin_path: "{{ nvm_install_dir }}/versions/node/{{ node_version }}/bin/clawdbot"
+
+# Configuration paths
+clawdbot_config_dir: "{{ clawdbot_home }}/.clawdbot"
+clawdbot_workspace: "{{ clawdbot_home }}/clawd"
+
+# Gateway configuration
+clawdbot_gateway_port: 18789
+clawdbot_gateway_token: "CHANGE_ME_GATEWAY_TOKEN"
+clawdbot_gateway_auth_token: "CHANGE_ME_AUTH_TOKEN"
+
+# WhatsApp configuration
+clawdbot_whatsapp_allow_from:
+  - "+1234567890"
+
+# Monitor configuration
+monitor_log_file: "{{ clawdbot_workspace }}/monitor_log.txt"
+monitor_state_dir: "/tmp/clawdbot_monitor"
+max_restart_attempts: 3
+backoff_base: 60
+cron_schedule: "*/3 * * * *"
+monitor_script_dest: "{{ clawdbot_workspace }}/monitor_clawdbot.sh"
+monitor_script_src: "monitor_clawdbot.sh.j2"
+
+# Systemd service
+systemd_user_service_name: "clawdbot-gateway.service"
+systemd_user_service_dir: "{{ clawdbot_home }}/.config/systemd/user"
+
+# Systemd service environment
+systemd_environment:
+  HOME: "{{ clawdbot_home }}"
+  PATH: "{{ clawdbot_home }}/.local/share/pnpm:{{ nvm_install_dir }}/current/bin:{{ clawdbot_home }}/.local/bin:{{ clawdbot_home }}/.npm-global/bin:{{ clawdbot_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+  CLAWDBOT_GATEWAY_PORT: "{{ clawdbot_gateway_port }}"
+  CLAWDBOT_GATEWAY_TOKEN: "{{ clawdbot_gateway_token }}"
+  CLAWDBOT_SYSTEMD_UNIT: "{{ systemd_user_service_name }}"
+  CLAWDBOT_SERVICE_MARKER: "clawdbot"
+  CLAWDBOT_SERVICE_KIND: "gateway"
+  CLAWDBOT_SERVICE_VERSION: "{{ clawdbot_version }}"
+node_executable: "/usr/bin/node"
+clawdbot_entry_path: "{{ clawdbot_install_dir }}/dist/entry.js"
+home_dir: "{{ clawdbot_home }}"
+
+# Secrets (should be overridden via ansible-vault or extra vars)
+clawdbot_secrets:
+  gateway_token: "{{ clawdbot_gateway_token }}"
+  auth_token: "{{ clawdbot_gateway_auth_token }}"
+
+# Clawdbot JSON configuration structure
+clawdbot_config:
+  meta:
+    lastTouchedVersion: "{{ clawdbot_version }}"
+    lastTouchedAt: "{{ ansible_date_time.iso8601 }}"
+  wizard:
+    lastRunAt: "{{ ansible_date_time.iso8601 }}"
+    lastRunVersion: "{{ clawdbot_version }}"
+    lastRunCommand: "doctor"
+    lastRunMode: "local"
+  auth:
+    profiles:
+      github-copilot:github:
+        provider: "github-copilot"
+        mode: "token"
+  agents:
+    defaults:
+      model:
+        primary: "github-copilot/grok-code-fast-1"
+      models:
+        github-copilot/grok-code-fast-1: {}
+      workspace: "{{ clawdbot_workspace }}"
+      compaction:
+        mode: "safeguard"
+      maxConcurrent: 4
+      subagents:
+        maxConcurrent: 8
+  messages:
+    ackReactionScope: "group-mentions"
+  commands:
+    native: "auto"
+    nativeSkills: "auto"
+  hooks:
+    internal:
+      enabled: true
+      entries:
+        session-memory:
+          enabled: true
+        boot-md:
+          enabled: true
+  channels:
+    whatsapp:
+      dmPolicy: "allowlist"
+      selfChatMode: true
+      allowFrom: "{{ clawdbot_whatsapp_allow_from }}"
+      groupPolicy: "allowlist"
+      mediaMaxMb: 50
+      debounceMs: 0
+  gateway:
+    port: "{{ clawdbot_gateway_port }}"
+    mode: "local"
+    bind: "loopback"
+    auth:
+      mode: "token"
+      token: "{{ clawdbot_gateway_auth_token }}"
+    tailscale:
+      mode: "off"
+      resetOnExit: false
+  skills:
+    install:
+      nodeManager: "npm"
+  plugins:
+    entries:
+      whatsapp:
+        enabled: true

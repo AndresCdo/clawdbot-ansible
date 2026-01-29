@@ -1,0 +1,21 @@
+[Unit]
+Description=Clawdbot Gateway (v{{ systemd_environment.CLAWDBOT_SERVICE_VERSION }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart="{{ node_executable }}" "{{ clawdbot_entry_path | expanduser }}" gateway --port {{ clawdbot_gateway_port }}
+Restart=always
+RestartSec=5
+KillMode=process
+Environment="HOME={{ home_dir }}"
+Environment="PATH={{ systemd_environment.PATH }}"
+Environment=CLAWDBOT_GATEWAY_PORT={{ systemd_environment.CLAWDBOT_GATEWAY_PORT }}
+Environment=CLAWDBOT_GATEWAY_TOKEN={{ systemd_environment.CLAWDBOT_GATEWAY_TOKEN }}
+Environment="CLAWDBOT_SYSTEMD_UNIT={{ systemd_environment.CLAWDBOT_SYSTEMD_UNIT }}"
+Environment=CLAWDBOT_SERVICE_MARKER={{ systemd_environment.CLAWDBOT_SERVICE_MARKER }}
+Environment=CLAWDBOT_SERVICE_KIND={{ systemd_environment.CLAWDBOT_SERVICE_KIND }}
+Environment=CLAWDBOT_SERVICE_VERSION={{ systemd_environment.CLAWDBOT_SERVICE_VERSION }}
+
+[Install]
+WantedBy=default.target

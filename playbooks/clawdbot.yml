@@ -1,0 +1,26 @@
+---
+- name: Deploy Clawdbot with monitoring and systemd service
+  hosts: all
+  become: true
+  vars_files:
+    - "../group_vars/all.yml"
+  tasks:
+    - name: Include nvm_node role
+      include_role:
+        name: nvm_node
+
+    - name: Include clawdbot_install role
+      include_role:
+        name: clawdbot_install
+
+    - name: Include clawdbot_config role
+      include_role:
+        name: clawdbot_config
+
+    - name: Include systemd_service role
+      include_role:
+        name: systemd_service
+
+    - name: Include cron_monitor role
+      include_role:
+        name: cron_monitor

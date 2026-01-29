@@ -1,0 +1,11 @@
+*.retry
+.vagrant
+*.log
+*.swp
+.DS_Store
+*.vault
+secrets.yml
+.env
+*.tmp
+__pycache__/
+*.pyc

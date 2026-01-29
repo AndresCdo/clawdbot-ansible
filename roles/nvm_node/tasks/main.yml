@@ -1,0 +1,54 @@
+---
+- name: Install system dependencies
+  become: true
+  apt:
+    name:
+      - curl
+      - git
+      - build-essential
+    state: present
+    update_cache: yes
+
+- name: Clone NVM repository
+  git:
+    repo: "https://github.com/nvm-sh/nvm.git"
+    dest: "{{ nvm_install_dir }}"
+    version: "v{{ nvm_version }}"
+    force: yes
+
+- name: Set up NVM environment in shell profiles
+  blockinfile:
+    path: "{{ clawdbot_home }}/.bashrc"
+    block: |
+      export NVM_DIR="{{ nvm_install_dir }}"
+      [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+      [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - NVM"
+
+- name: Source NVM to current shell
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}" && . "$NVM_DIR/nvm.sh"
+  changed_when: false
+
+- name: Install Node.js {{ node_version }} via NVM
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}"
+    . "$NVM_DIR/nvm.sh"
+    nvm install {{ node_version }}
+    nvm alias default {{ node_version }}
+  args:
+    executable: /bin/bash
+  environment:
+    NVM_DIR: "{{ nvm_install_dir }}"
+
+- name: Verify Node.js installation
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}"
+    . "$NVM_DIR/nvm.sh"
+    node --version
+  register: node_version_out
+  changed_when: false
+
+- name: Debug Node version
+  debug:
+    msg: "Node.js {{ node_version_out.stdout }} installed"

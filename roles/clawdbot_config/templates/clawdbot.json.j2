@@ -1,0 +1,21 @@
+{
+  "meta": {
+    "lastTouchedVersion": "{{ clawdbot_config.meta.lastTouchedVersion }}",
+    "lastTouchedAt": "{{ clawdbot_config.meta.lastTouchedAt }}"
+  },
+  "wizard": {
+    "lastRunAt": "{{ clawdbot_config.wizard.lastRunAt }}",
+    "lastRunVersion": "{{ clawdbot_config.wizard.lastRunVersion }}",
+    "lastRunCommand": "{{ clawdbot_config.wizard.lastRunCommand }}",
+    "lastRunMode": "{{ clawdbot_config.wizard.lastRunMode }}"
+  },
+  "auth": {{ clawdbot_config.auth | to_json }},
+  "agents": {{ clawdbot_config.agents | to_json }},
+  "messages": {{ clawdbot_config.messages | to_json }},
+  "commands": {{ clawdbot_config.commands | to_json }},
+  "hooks": {{ clawdbot_config.hooks | to_json }},
+  "channels": {{ clawdbot_config.channels | to_json }},
+  "gateway": {{ clawdbot_config.gateway | to_json }},
+  "skills": {{ clawdbot_config.skills | to_json }},
+  "plugins": {{ clawdbot_config.plugins | to_json }}
+}

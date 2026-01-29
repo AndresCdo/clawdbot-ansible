@@ -1,0 +1,28 @@
+---
+- name: Ensure NVM is sourced
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}"
+    . "$NVM_DIR/nvm.sh"
+  changed_when: false
+
+- name: Install clawdbot globally via npm
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}"
+    . "$NVM_DIR/nvm.sh"
+    npm install -g clawdbot@{{ clawdbot_version }}
+  args:
+    executable: /bin/bash
+  environment:
+    NVM_DIR: "{{ nvm_install_dir }}"
+
+- name: Verify clawdbot installation
+  shell: |
+    export NVM_DIR="{{ nvm_install_dir }}"
+    . "$NVM_DIR/nvm.sh"
+    clawdbot --version 2>/dev/null || echo "not found"
+  register: clawdbot_version_out
+  changed_when: false
+
+- name: Debug clawdbot version
+  debug:
+    msg: "Clawdbot {{ clawdbot_version_out.stdout }} installed"

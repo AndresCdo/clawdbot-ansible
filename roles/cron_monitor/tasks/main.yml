@@ -1,0 +1,33 @@
+---
+- name: Ensure monitor script directory exists
+  file:
+    path: "{{ monitor_script_dest | dirname | expanduser }}"
+    state: directory
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Template monitor script
+  template:
+    src: "{{ monitor_script_src }}"
+    dest: "{{ monitor_script_dest | expanduser }}"
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Add cron job for monitor script
+  cron:
+    name: "Monitor Clawdbot and WhatsApp"
+    minute: "{{ cron_schedule.split(' ')[0] }}"
+    hour: "{{ cron_schedule.split(' ')[1] }}"
+    day: "{{ cron_schedule.split(' ')[2] }}"
+    month: "{{ cron_schedule.split(' ')[3] }}"
+    weekday: "{{ cron_schedule.split(' ')[4] }}"
+    user: "{{ node_user }}"
+    job: "bash {{ monitor_script_dest | expanduser }} > /dev/null 2>&1"
+    state: present
+
+- name: Ensure monitor log file exists
+  file:
+    path: "{{ monitor_log_file | expanduser }}"
+    state: touch
+    owner: "{{ clawdbot_user }}"
+    mode: "0644"
