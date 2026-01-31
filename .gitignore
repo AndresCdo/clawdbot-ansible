@@ -9,3 +9,4 @@ secrets.yml
 *.tmp
 __pycache__/
 *.pyc
+MEJORAS.md
