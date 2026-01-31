@@ -1,0 +1,343 @@
+#!/bin/bash
+# Deploy quirúrgico de Clawdbot con backup, health checks y rollback automático
+# Uso: ./deploy.sh [version] [--mode=full|reload|hot]
+# Ejemplos:
+#   ./deploy.sh 2026.1.24-4              # Deploy versión específica
+#   ./deploy.sh latest                   # Deploy última versión
+#   ./deploy.sh --mode=reload            # Solo recargar (graceful)
+#   ./deploy.sh 2026.1.24-4 --mode=hot   # Deploy con hot reload
+
+set -euo pipefail
+
+# Configuration
+CLAWDBOT="{{ clawdbot_bin_path | expanduser }}"
+NVM_DIR="{{ nvm_install_dir | expanduser }}"
+WORKSPACE="{{ clawdbot_workspace | expanduser }}"
+LOGFILE="$WORKSPACE/deploy.log"
+BACKUP_DIR="$WORKSPACE/backups"
+HEALTH_SCRIPT="$WORKSPACE/health_check.sh"
+
+# Arguments
+VERSION="{{ clawdbot_version }}"
+MODE="full"  # full, reload, hot
+
+# Parse arguments
+for arg in "$@"; do
+    case $arg in
+        --mode=*)
+            MODE="${arg#*=}"
+            shift
+            ;;
+        --version=*)
+            VERSION="${arg#*=}"
+            shift
+            ;;
+        *)
+            # Assume it's a version if not a flag
+            if [[ ! "$arg" == --* ]]; then
+                VERSION="$arg"
+            fi
+            ;;
+    esac
+done
+
+# Logging
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOGFILE"
+}
+
+error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2 | tee -a "$LOGFILE"
+}
+
+# Initialize NVM
+init_nvm() {
+    export NVM_DIR
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+}
+
+# Get current installed version
+get_current_version() {
+    if [ -f "$CLAWDBOT" ]; then
+        "$CLAWDBOT" --version 2>/dev/null || echo "unknown"
+    else
+        echo "not_installed"
+    fi
+}
+
+# Pre-deploy: Backup everything
+pre_deploy_backup() {
+    log "=== PRE-DEPLOY BACKUP ==="
+    
+    # Create backup directory
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_path="$BACKUP_DIR/${timestamp}"
+    mkdir -p "$backup_path"
+    
+    # Backup current version
+    local current_version=$(get_current_version)
+    log "Current version: $current_version"
+    echo "$current_version" > "$backup_path/version.txt"
+    
+    # Backup config
+    if [ -f "$HOME/.clawdbot/clawdbot.json" ]; then
+        cp "$HOME/.clawdbot/clawdbot.json" "$backup_path/"
+        log "Config backed up"
+    fi
+    
+    # Backup systemd service status
+    systemctl --user status clawdbot-gateway > "$backup_path/service_status.log" 2>&1 || true
+    log "Service status backed up"
+    
+    # Store backup path for potential rollback
+    echo "$backup_path" > "$BACKUP_DIR/latest_backup.txt"
+    
+    log "Backup complete: $backup_path"
+    echo "$backup_path"
+}
+
+# Health check wrapper
+health_check() {
+    local timeout=${1:-30}
+    local attempts=${2:-3}
+    
+    log "Health check (timeout: ${timeout}s, attempts: $attempts)..."
+    
+    for i in $(seq 1 $attempts); do
+        if [ -x "$HEALTH_SCRIPT" ]; then
+            if "$HEALTH_SCRIPT" --timeout=$timeout 2>/dev/null; then
+                log "Health check passed (attempt $i/$attempts)"
+                return 0
+            fi
+        else
+            # Fallback check
+            if timeout 5 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/{{ clawdbot_gateway_port }}" 2>/dev/null; then
+                log "Basic health check passed (attempt $i/$attempts)"
+                return 0
+            fi
+        fi
+        log "Health check failed (attempt $i/$attempts), waiting..."
+        sleep 5
+    done
+    
+    error "Health check failed after $attempts attempts"
+    return 1
+}
+
+# Deploy: Install new version
+deploy_version() {
+    local version=$1
+    log "=== DEPLOY: Installing version $version ==="
+    
+    init_nvm
+    
+    if [ "$version" = "latest" ]; then
+        log "Installing latest version..."
+        npm install -g clawdbot@latest 2>&1 | tee -a "$LOGFILE"
+    else
+        log "Installing version $version..."
+        npm install -g "clawdbot@$version" 2>&1 | tee -a "$LOGFILE"
+    fi
+    
+    local new_version=$(get_current_version)
+    log "Installed version: $new_version"
+    
+    if [ "$new_version" = "unknown" ] || [ "$new_version" = "not_installed" ]; then
+        error "Installation failed - clawdbot not found after install"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Restart: Full restart with cleanup
+restart_full() {
+    log "=== RESTART: Full restart with cleanup ==="
+    
+    log "Stopping service..."
+    systemctl --user stop clawdbot-gateway.service 2>&1 | tee -a "$LOGFILE" || true
+    
+    sleep 3
+    
+    log "Cleaning up orphaned processes..."
+    timeout 10 pkill -f "chrome.*clawdbot" 2>/dev/null || true
+    timeout 10 pkill -f "chromium.*clawdbot" 2>/dev/null || true
+    sleep 2
+    
+    log "Starting service..."
+    if systemctl --user start clawdbot-gateway.service 2>&1 | tee -a "$LOGFILE"; then
+        log "Service started successfully"
+        return 0
+    else
+        error "Failed to start service"
+        return 1
+    fi
+}
+
+# Restart: Graceful reload
+restart_reload() {
+    log "=== RESTART: Graceful reload ==="
+    
+    log "Sending reload signal..."
+    if systemctl --user reload clawdbot-gateway.service 2>&1 | tee -a "$LOGFILE"; then
+        log "Reload signal sent successfully"
+        sleep 5
+        return 0
+    else
+        log "Graceful reload not supported or failed, falling back to full restart"
+        return 1
+    fi
+}
+
+# Restart: Hot reload (for development)
+restart_hot() {
+    log "=== RESTART: Hot reload ==="
+    
+    # For hot reload, we just trigger the monitor to detect code changes
+    # The monitor will handle the reload automatically
+    log "Hot reload mode: Monitor will detect changes and handle reload"
+    
+    # Force health check to ensure everything is working
+    sleep 2
+    return 0
+}
+
+# Rollback: Restore previous version
+rollback() {
+    log "=== ROLLBACK ==="
+    
+    local backup_path=$(cat "$BACKUP_DIR/latest_backup.txt" 2>/dev/null || echo "")
+    
+    if [ -z "$backup_path" ] || [ ! -d "$backup_path" ]; then
+        error "No backup found for rollback"
+        return 1
+    fi
+    
+    log "Rolling back from backup: $backup_path"
+    
+    # Get previous version
+    local prev_version=$(cat "$backup_path/version.txt" 2>/dev/null || echo "{{ clawdbot_version }}")
+    
+    # Restore config if needed
+    if [ -f "$backup_path/clawdbot.json" ]; then
+        cp "$backup_path/clawdbot.json" "$HOME/.clawdbot/"
+        log "Config restored"
+    fi
+    
+    # Reinstall previous version
+    init_nvm
+    log "Reinstalling previous version: $prev_version"
+    npm install -g "clawdbot@$prev_version" 2>&1 | tee -a "$LOGFILE"
+    
+    # Full restart
+    restart_full
+    
+    # Verify
+    if health_check 30 5; then
+        log "Rollback successful, system is healthy"
+        return 0
+    else
+        error "Rollback failed, system is still unhealthy"
+        return 1
+    fi
+}
+
+# Main deployment flow
+main() {
+    log "========================================="
+    log "DEPLOYMENT STARTED"
+    log "Target version: $VERSION"
+    log "Mode: $MODE"
+    log "========================================="
+    
+    # Validate mode
+    case "$MODE" in
+        full|reload|hot)
+            ;;
+        *)
+            error "Invalid mode: $MODE. Use: full, reload, or hot"
+            exit 1
+            ;;
+    esac
+    
+    # Step 1: Pre-deploy backup
+    local backup_path=$(pre_deploy_backup)
+    
+    # Step 2: Pre-deploy health check
+    log "=== PRE-DEPLOY HEALTH CHECK ==="
+    if ! health_check 15 3; then
+        error "System is not healthy before deployment!"
+        log "Deployment aborted to avoid making things worse."
+        log "Please fix the current issues before deploying."
+        exit 1
+    fi
+    log "System is healthy, proceeding with deployment"
+    
+    # Step 3: Deploy new version (if not just reloading)
+    if [ "$MODE" != "reload" ]; then
+        if ! deploy_version "$VERSION"; then
+            error "Deployment failed during installation"
+            log "Attempting rollback..."
+            rollback
+            exit 1
+        fi
+    fi
+    
+    # Step 4: Restart based on mode
+    local restart_success=false
+    case "$MODE" in
+        reload)
+            if restart_reload; then
+                restart_success=true
+            else
+                log "Graceful reload failed, trying full restart..."
+                if restart_full; then
+                    restart_success=true
+                fi
+            fi
+            ;;
+        hot)
+            restart_hot
+            restart_success=true
+            ;;
+        full)
+            if restart_full; then
+                restart_success=true
+            fi
+            ;;
+    esac
+    
+    if [ "$restart_success" != "true" ]; then
+        error "Restart failed"
+        log "Attempting rollback..."
+        rollback
+        exit 1
+    fi
+    
+    # Step 5: Post-deploy health check with extended timeout
+    log "=== POST-DEPLOY HEALTH CHECK ==="
+    local new_version=$(get_current_version)
+    log "New version: $new_version"
+    
+    if ! health_check 30 6; then
+        error "Health check failed after deployment!"
+        log "Attempting rollback..."
+        rollback
+        exit 1
+    fi
+    
+    # Success!
+    log "========================================="
+    log "DEPLOYMENT SUCCESSFUL!"
+    log "Version: $new_version"
+    log "Backup: $backup_path"
+    log "========================================="
+    
+    # Cleanup old backups (keep last 10)
+    ls -1t "$BACKUP_DIR" | tail -n +11 | xargs -I {} rm -rf "$BACKUP_DIR/{}" 2>/dev/null || true
+    
+    exit 0
+}
+
+# Run main
+main "$@"

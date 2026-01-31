@@ -1,13 +1,16 @@
 #!/bin/bash
 
 # Monitor Clawdbot and WhatsApp channel
-# OPCIÓN B: Intelligent monitoring with error analysis and backoff
+# OPCIÓN C: Enhanced monitoring with code change detection and metrics
 # Features:
 #  - Dual-check for gateway (systemctl + process check)
 #  - Error discrimination (network vs app crash)
 #  - Exponential backoff for non-critical issues
 #  - WhatsApp-specific health validation
 #  - False positive prevention
+#  - Code change detection for auto-restart on updates
+#  - Resource metrics logging
+#  - Integration with health_check.sh
 
 LOGFILE="{{ monitor_log_file | expanduser }}"
 STATE_DIR="{{ monitor_state_dir }}"
@@ -16,6 +19,7 @@ BACKOFF_BASE={{ backoff_base }}  # Start with 1 minute (60 seconds)
 
 # Use explicit path to clawdbot (NVM)
 CLAWDBOT="{{ clawdbot_bin_path | expanduser }}"
+CLAWDBOT_INSTALL_DIR="{{ clawdbot_install_dir | expanduser }}"
 
 # CRITICAL: Set up systemd user bus for cron execution
 # This allows systemctl --user to work from cron jobs
@@ -33,6 +37,114 @@ fi
 
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" >> "$LOGFILE"
+}
+
+# ============================================================================
+# ENHANCED MONITORING FUNCTIONS
+# ============================================================================
+
+# Check if clawdbot code has changed (npm update or local modification)
+check_code_changes() {
+    local checksum_file="$STATE_DIR/code_checksum"
+    local version_file="$STATE_DIR/last_known_version"
+    
+    # Get current version
+    local current_version=$("$CLAWDBOT" --version 2>/dev/null || echo "unknown")
+    
+    # Calculate checksum of dist files
+    local current_checksum=$(find "$CLAWDBOT_INSTALL_DIR/dist" -type f -exec md5sum {} \; 2>/dev/null | sort | md5sum | cut -d' ' -f1)
+    
+    # First run - initialize
+    if [ ! -f "$checksum_file" ]; then
+        echo "$current_checksum" > "$checksum_file"
+        echo "$current_version" > "$version_file"
+        log_message "[INIT] Initialized code checksum tracking (version: $current_version)"
+        return 1  # No change detected (first run)
+    fi
+    
+    local old_checksum=$(cat "$checksum_file")
+    local old_version=$(cat "$version_file")
+    
+    # Check for changes
+    if [ "$current_checksum" != "$old_checksum" ] || [ "$current_version" != "$old_version" ]; then
+        log_message "[UPDATE] Code change detected! Version: $old_version -> $current_version"
+        log_message "[UPDATE] Checksum changed, scheduling graceful restart"
+        echo "$current_checksum" > "$checksum_file"
+        echo "$current_version" > "$version_file"
+        return 0  # Change detected
+    fi
+    
+    return 1  # No change
+}
+
+# Log resource metrics (memory, CPU)
+log_resource_metrics() {
+    local pid=$(pgrep -f "clawdbot.*gateway" | head -1)
+    
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    
+    # Memory usage
+    local mem_info=$(ps -p "$pid" -o %mem,rss,vsz --no-headers 2>/dev/null | awk '{print $1","$2","$3}')
+    
+    # CPU usage (instantaneous)
+    local cpu_percent=$(ps -p "$pid" -o %cpu --no-headers 2>/dev/null | tr -d ' ')
+    
+    # Process uptime
+    local uptime=$(ps -p "$pid" -o etime --no-headers 2>/dev/null | tr -d ' ')
+    
+    # Load average
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',')
+    
+    log_message "[METRICS] PID=$pid CPU=${cpu_percent}% MEM=$mem_info UPTIME=$uptime LOAD=$load_avg"
+}
+
+# Run comprehensive health check using the dedicated script
+run_health_check() {
+    local health_script="$(dirname $LOGFILE)/health_check.sh"
+    
+    if [ -x "$health_script" ]; then
+        local result=$("$health_script" --timeout=15 2>&1)
+        local exit_code=$?
+        
+        if [ $exit_code -eq 0 ]; then
+            log_message "[HEALTH] Comprehensive health check: PASSED"
+            return 0
+        else
+            log_message "[HEALTH] Comprehensive health check: FAILED - $result"
+            return 1
+        fi
+    else
+        # Fallback to basic check if script not available
+        log_message "[HEALTH] Health check script not found, using basic check"
+        return $(is_gateway_running)
+    fi
+}
+
+# Graceful restart using systemd reload instead of restart
+graceful_restart() {
+    local reason=$1
+    log_message "[RELOAD] Initiating graceful reload (reason: $reason)"
+    
+    # Try graceful reload first (SIGUSR1)
+    if systemctl --user reload clawdbot-gateway.service 2>/dev/null; then
+        log_message "[RELOAD] Graceful reload command sent"
+        sleep 5
+        
+        # Verify it's still running
+        if is_gateway_running; then
+            log_message "[RELOAD] Graceful reload successful"
+            return 0
+        else
+            log_message "[RELOAD] Graceful reload failed, falling back to full restart"
+        fi
+    else
+        log_message "[RELOAD] Reload not supported, using full restart"
+    fi
+    
+    # Fallback to full restart
+    return 1
 }
 
 # ============================================================================
@@ -327,78 +439,117 @@ clear_restart_tracking() {
 
 log_message "[START] Monitoring cycle initiated"
 
-# CHECK 1: Gateway process health
-log_message "[CHECK] Gateway process status (dual-check: systemctl + pgrep)"
-
-if is_gateway_running; then
-    log_message "[OK] Gateway is running (dual-check confirmed)"
-    clear_restart_tracking
-else
-    log_message "[ALERT] Gateway is DOWN (failed dual-check)"
+# NEW CHECK 0: Code change detection
+log_message "[CHECK] Checking for code changes or updates"
+if check_code_changes; then
+    log_message "[UPDATE] Code update detected, initiating graceful handling"
     
-    # Analyze what type of error caused this
-    ERROR_TYPE=$(analyze_error_type)
-    log_message "[ANALYSIS] Error type detected: $ERROR_TYPE"
-    
-    # Check if we're in exponential backoff
-    BACKOFF_REMAINING=$(check_backoff_status "$ERROR_TYPE")
-    BACKOFF_EXIT_CODE=$?
-    
-    if [ $BACKOFF_EXIT_CODE -ne 0 ]; then
-        log_message "[BACKOFF] Waiting $BACKOFF_REMAINING seconds before next retry (error type: $ERROR_TYPE)"
-        exit 0
-    fi
-    
-    # Check if we've exceeded max attempts
-    ATTEMPT_FILE="$STATE_DIR/restart_attempts"
-    ATTEMPT_COUNT=$(cat "$ATTEMPT_FILE" 2>/dev/null || echo "0")
-    
-    if [ "$ATTEMPT_COUNT" -ge "$MAX_RESTART_ATTEMPTS" ]; then
-        log_message "[CRITICAL] Max restart attempts ($MAX_RESTART_ATTEMPTS) exceeded. Manual intervention required."
-        touch "$STATE_DIR/restart_disabled"
-        exit 1
-    fi
-    
-    # Safe to attempt restart - use systemctl directly instead of clawdbot gateway restart
-    log_message "[ACTION] Attempting gateway restart (attempt $((ATTEMPT_COUNT + 1))/$MAX_RESTART_ATTEMPTS, error: $ERROR_TYPE)"
-    
-    # CRITICAL: Deep cleanup before restart to ensure fresh WhatsApp session
-    log_message "[ACTION] Stopping gateway service before cleanup"
-    systemctl --user stop clawdbot-gateway.service >> "$LOGFILE" 2>&1
-    sleep 3  # Give it time to stop gracefully
-    
-    # Perform deep cleanup of orphaned browser processes
-    deep_cleanup_browsers
-    
-    # Now restart the service
-    if systemctl --user start clawdbot-gateway.service >> "$LOGFILE" 2>&1; then
-        log_message "[SUCCESS] Gateway restart command executed via systemctl"
-        update_restart_tracking "$ERROR_TYPE"
-        
-        # Give it more time to start and stabilize (gateway can be slow)
-        # Extra time needed after deep cleanup to allow fresh browser session
-        log_message "[WAIT] Allowing 15 seconds for gateway and browser initialization"
-        sleep 15
-        
-        # Verify it actually started
-        if is_gateway_running; then
-            log_message "[VERIFIED] Gateway is now running (dual-check confirmed)"
-            
-            # Extra validation: Check WhatsApp specifically
-            sleep 3
-            if is_whatsapp_healthy; then
-                log_message "[VERIFIED] WhatsApp channel is healthy post-restart"
-                clear_restart_tracking
-            else
-                log_message "[WARNING] Gateway running but WhatsApp still unhealthy post-restart"
-            fi
+    # Try graceful reload first
+    if graceful_restart "code_update"; then
+        log_message "[UPDATE] Graceful reload successful after code update"
+        sleep 5
+        if run_health_check; then
+            log_message "[UPDATE] Health check passed after code update"
+            clear_restart_tracking
         else
-            log_message "[ERROR] Gateway restart command succeeded but service not actually running"
+            log_message "[WARNING] Health check failed after graceful reload, may need full restart"
         fi
     else
-        log_message "[ERROR] Gateway restart command failed"
-        update_restart_tracking "$ERROR_TYPE"
-        exit 1
+        log_message "[UPDATE] Graceful reload not available or failed, standard restart will be handled by health check"
+    fi
+fi
+
+# NEW CHECK 0.5: Log resource metrics periodically (every 5th cycle)
+CYCLE_COUNT_FILE="$STATE_DIR/cycle_count"
+CYCLE_COUNT=$(cat "$CYCLE_COUNT_FILE" 2>/dev/null || echo "0")
+CYCLE_COUNT=$((CYCLE_COUNT + 1))
+echo "$CYCLE_COUNT" > "$CYCLE_COUNT_FILE"
+
+if [ $((CYCLE_COUNT % 5)) -eq 0 ]; then
+    log_message "[METRICS] Periodic resource metrics collection"
+    log_resource_metrics
+fi
+
+# CHECK 1: Comprehensive health check (replaces basic gateway check)
+log_message "[CHECK] Running comprehensive health check"
+
+if run_health_check; then
+    log_message "[OK] Comprehensive health check passed"
+    clear_restart_tracking
+else
+    log_message "[ALERT] Health check FAILED"
+    
+    # Check if it's just the gateway that's down
+    if ! is_gateway_running; then
+        log_message "[ALERT] Gateway is DOWN (failed dual-check)"
+        
+        # Analyze what type of error caused this
+        ERROR_TYPE=$(analyze_error_type)
+        log_message "[ANALYSIS] Error type detected: $ERROR_TYPE"
+        
+        # Check if we're in exponential backoff
+        BACKOFF_REMAINING=$(check_backoff_status "$ERROR_TYPE")
+        BACKOFF_EXIT_CODE=$?
+        
+        if [ $BACKOFF_EXIT_CODE -ne 0 ]; then
+            log_message "[BACKOFF] Waiting $BACKOFF_REMAINING seconds before next retry (error type: $ERROR_TYPE)"
+            exit 0
+        fi
+        
+        # Check if we've exceeded max attempts
+        ATTEMPT_FILE="$STATE_DIR/restart_attempts"
+        ATTEMPT_COUNT=$(cat "$ATTEMPT_FILE" 2>/dev/null || echo "0")
+        
+        if [ "$ATTEMPT_COUNT" -ge "$MAX_RESTART_ATTEMPTS" ]; then
+            log_message "[CRITICAL] Max restart attempts ($MAX_RESTART_ATTEMPTS) exceeded. Manual intervention required."
+            touch "$STATE_DIR/restart_disabled"
+            exit 1
+        fi
+        
+        # Safe to attempt restart - use systemctl directly instead of clawdbot gateway restart
+        log_message "[ACTION] Attempting gateway restart (attempt $((ATTEMPT_COUNT + 1))/$MAX_RESTART_ATTEMPTS, error: $ERROR_TYPE)"
+        
+        # CRITICAL: Deep cleanup before restart to ensure fresh WhatsApp session
+        log_message "[ACTION] Stopping gateway service before cleanup"
+        systemctl --user stop clawdbot-gateway.service >> "$LOGFILE" 2>&1
+        sleep 3  # Give it time to stop gracefully
+        
+        # Perform deep cleanup of orphaned browser processes
+        deep_cleanup_browsers
+        
+        # Now restart the service
+        if systemctl --user start clawdbot-gateway.service >> "$LOGFILE" 2>&1; then
+            log_message "[SUCCESS] Gateway restart command executed via systemctl"
+            update_restart_tracking "$ERROR_TYPE"
+            
+            # Give it more time to start and stabilize (gateway can be slow)
+            # Extra time needed after deep cleanup to allow fresh browser session
+            log_message "[WAIT] Allowing 15 seconds for gateway and browser initialization"
+            sleep 15
+            
+            # Verify it actually started
+            if is_gateway_running; then
+                log_message "[VERIFIED] Gateway is now running (dual-check confirmed)"
+                
+                # Extra validation: Check WhatsApp specifically
+                sleep 3
+                if is_whatsapp_healthy; then
+                    log_message "[VERIFIED] WhatsApp channel is healthy post-restart"
+                    clear_restart_tracking
+                else
+                    log_message "[WARNING] Gateway running but WhatsApp still unhealthy post-restart"
+                fi
+            else
+                log_message "[ERROR] Gateway restart command succeeded but service not actually running"
+            fi
+        else
+            log_message "[ERROR] Gateway restart command failed"
+            update_restart_tracking "$ERROR_TYPE"
+            exit 1
+        fi
+    else
+        # Gateway is running but health check failed - might be WhatsApp or resource issues
+        log_message "[WARNING] Gateway running but comprehensive health check failed"
     fi
 fi
 

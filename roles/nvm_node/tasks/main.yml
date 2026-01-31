@@ -9,12 +9,27 @@
     state: present
     update_cache: yes
 
+- name: Check if NVM is already installed
+  stat:
+    path: "{{ nvm_install_dir }}/nvm.sh"
+  register: nvm_installed
+
 - name: Clone NVM repository
   git:
     repo: "https://github.com/nvm-sh/nvm.git"
     dest: "{{ nvm_install_dir }}"
     version: "v{{ nvm_version }}"
     force: yes
+    recursive: no
+  when: not nvm_installed.stat.exists
+
+- name: Ensure NVM directory ownership
+  file:
+    path: "{{ nvm_install_dir }}"
+    owner: "{{ clawdbot_user }}"
+    group: "{{ clawdbot_user }}"
+    recurse: yes
+  when: nvm_installed.stat.exists
 
 - name: Set up NVM environment in shell profiles
   blockinfile:

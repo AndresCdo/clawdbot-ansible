@@ -1,0 +1,210 @@
+#!/bin/bash
+# Health Check Avanzado para Clawdbot
+# Verifica: gateway responsive, WhatsApp OK, memoria/CPU, logs de errores
+# Uso: ./health_check.sh [--timeout=30] [--verbose]
+
+set -euo pipefail
+
+# Configuration
+CLAWDBOT="{{ clawdbot_bin_path | expanduser }}"
+GATEWAY_PORT={{ clawdbot_gateway_port }}
+TIMEOUT=30
+VERBOSE=false
+MAX_MEMORY_PERCENT=80
+MAX_CPU_PERCENT=90
+
+# Parse arguments
+for arg in "$@"; do
+    case $arg in
+        --timeout=*)
+            TIMEOUT="${arg#*=}"
+            shift
+            ;;
+        --verbose)
+            VERBOSE=true
+            shift
+            ;;
+    esac
+done
+
+# Logging
+log() {
+    if [ "$VERBOSE" = true ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    fi
+}
+
+error() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2
+}
+
+# Check 1: Gateway port is responsive
+check_gateway_port() {
+    log "Checking gateway port $GATEWAY_PORT..."
+    if timeout 3 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/$GATEWAY_PORT" 2>/dev/null; then
+        log "Gateway port is responsive"
+        return 0
+    else
+        error "Gateway port $GATEWAY_PORT is not responsive"
+        return 1
+    fi
+}
+
+# Check 2: WhatsApp channel is healthy
+check_whatsapp() {
+    log "Checking WhatsApp channel health..."
+    if [ ! -f "$CLAWDBOT" ]; then
+        error "Clawdbot binary not found at $CLAWDBOT"
+        return 1
+    fi
+    
+    local status_output=$(timeout $TIMEOUT "$CLAWDBOT" status 2>&1)
+    
+    if echo "$status_output" | grep -qi "WhatsApp.*OK"; then
+        log "WhatsApp channel is healthy"
+        return 0
+    else
+        error "WhatsApp channel is not healthy"
+        if [ "$VERBOSE" = true ]; then
+            echo "$status_output" | grep -i "whatsapp" || echo "No WhatsApp status found"
+        fi
+        return 1
+    fi
+}
+
+# Check 3: Process exists and is not zombie
+check_process() {
+    log "Checking gateway process..."
+    local pid=$(pgrep -f "clawdbot.*gateway" | head -1)
+    
+    if [ -z "$pid" ]; then
+        error "No gateway process found"
+        return 1
+    fi
+    
+    # Check if process is zombie
+    local state=$(ps -p "$pid" -o state= 2>/dev/null | tr -d ' ')
+    if [ "$state" = "Z" ]; then
+        error "Gateway process is zombie (PID: $pid)"
+        return 1
+    fi
+    
+    log "Gateway process is healthy (PID: $pid, State: $state)"
+    return 0
+}
+
+# Check 4: Memory usage is acceptable
+check_memory() {
+    log "Checking memory usage..."
+    local pid=$(pgrep -f "clawdbot.*gateway" | head -1)
+    
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    
+    local mem_percent=$(ps -p "$pid" -o %mem= 2>/dev/null | tr -d ' ' | cut -d'.' -f1)
+    
+    if [ -z "$mem_percent" ] || [ "$mem_percent" -eq 0 ]; then
+        log "Could not determine memory usage"
+        return 0
+    fi
+    
+    if [ "$mem_percent" -gt "$MAX_MEMORY_PERCENT" ]; then
+        error "Memory usage is too high: ${mem_percent}% (max: ${MAX_MEMORY_PERCENT}%)"
+        return 1
+    fi
+    
+    log "Memory usage is OK: ${mem_percent}%"
+    return 0
+}
+
+# Check 5: CPU usage is acceptable
+check_cpu() {
+    log "Checking CPU usage..."
+    local pid=$(pgrep -f "clawdbot.*gateway" | head -1)
+    
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+    
+    # Get CPU usage over 2 seconds
+    local cpu_start=$(cat /proc/$pid/stat 2>/dev/null | awk '{print $14+$15}')
+    sleep 2
+    local cpu_end=$(cat /proc/$pid/stat 2>/dev/null | awk '{print $14+$15}')
+    
+    if [ -z "$cpu_start" ] || [ -z "$cpu_end" ]; then
+        log "Could not determine CPU usage"
+        return 0
+    fi
+    
+    local cpu_usage=$(( (cpu_end - cpu_start) / 2 ))
+    
+    if [ "$cpu_usage" -gt "$MAX_CPU_PERCENT" ]; then
+        error "CPU usage is too high: ${cpu_usage}% (max: ${MAX_CPU_PERCENT}%)"
+        return 1
+    fi
+    
+    log "CPU usage is OK: ${cpu_usage}%"
+    return 0
+}
+
+# Check 6: No recent critical errors in logs
+check_logs() {
+    log "Checking recent logs for critical errors..."
+    
+    local log_files="/tmp/clawdbot/clawdbot-*.log"
+    local five_min_ago=$(date -d '5 minutes ago' '+%Y-%m-%dT%H:%M' 2>/dev/null || date -v-5M '+%Y-%m-%dT%H:%M')
+    
+    # Check for FATAL, crash, or segfault in last 5 minutes
+    local critical_errors=$(grep -h "FATAL\|Segmentation\|SIGSEGV\|core dumped" $log_files 2>/dev/null | grep "$five_min_ago" | wc -l)
+    
+    if [ "$critical_errors" -gt 0 ]; then
+        error "Found $critical_errors critical errors in last 5 minutes"
+        return 1
+    fi
+    
+    log "No critical errors found in recent logs"
+    return 0
+}
+
+# Check 7: Systemd service is active
+check_systemd() {
+    log "Checking systemd service status..."
+    
+    if systemctl --user is-active --quiet clawdbot-gateway 2>/dev/null; then
+        log "Systemd service is active"
+        return 0
+    else
+        error "Systemd service is not active"
+        return 1
+    fi
+}
+
+# Main health check function
+main() {
+    local failed=0
+    
+    log "Starting comprehensive health check..."
+    
+    # Run all checks
+    check_systemd || ((failed++))
+    check_process || ((failed++))
+    check_gateway_port || ((failed++))
+    check_whatsapp || ((failed++))
+    check_memory || ((failed++))
+    check_cpu || ((failed++))
+    check_logs || ((failed++))
+    
+    if [ $failed -eq 0 ]; then
+        log "All health checks passed!"
+        echo "HEALTHY"
+        exit 0
+    else
+        error "$failed health check(s) failed"
+        echo "UNHEALTHY"
+        exit 1
+    fi
+}
+
+# Run main function
+main "$@"

@@ -1,6 +1,6 @@
 ---
 # Global variables for Clawdbot Ansible deployment
-clawdbot_user: "ubuntu"
+clawdbot_user: "andres"
 clawdbot_user_id: 1000
 clawdbot_home: "/home/{{ clawdbot_user }}"
 
@@ -25,7 +25,7 @@ clawdbot_gateway_auth_token: "CHANGE_ME_AUTH_TOKEN"
 
 # WhatsApp configuration
 clawdbot_whatsapp_allow_from:
-  - "+1234567890"
+  - "+573185930967"
 
 # Monitor configuration
 monitor_log_file: "{{ clawdbot_workspace }}/monitor_log.txt"
@@ -124,3 +124,32 @@ clawdbot_config:
     entries:
       whatsapp:
         enabled: true
+
+# =============================================================================
+# ENHANCED MONITORING & DEPLOYMENT CONFIGURATION
+# =============================================================================
+
+# Health check configuration
+health_check_timeout: 15
+health_check_max_attempts: 3
+health_check_max_memory_percent: 80
+health_check_max_cpu_percent: 90
+
+# Code change detection
+enable_code_change_detection: true
+code_change_check_interval: 1  # Check every N monitor cycles
+
+# Resource metrics logging
+enable_resource_metrics: true
+metrics_log_interval: 5  # Log metrics every N monitor cycles
+
+# Graceful restart configuration
+enable_graceful_reload: true
+graceful_reload_timeout: 5  # Seconds to wait after reload signal
+
+# Deploy script configuration
+deploy_backup_retention: 10  # Number of backups to keep
+deploy_default_mode: "full"  # Default mode: full, reload, or hot
+deploy_rollback_on_failure: true
+deploy_health_check_timeout: 30
+deploy_health_check_attempts: 6

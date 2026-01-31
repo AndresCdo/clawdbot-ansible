@@ -4,10 +4,22 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+Type=simple
 ExecStart="{{ node_executable }}" "{{ clawdbot_entry_path | expanduser }}" gateway --port {{ clawdbot_gateway_port }}
+
+# Graceful reload support - sends SIGUSR1 for reload, SIGTERM for stop
+ExecReload=/bin/kill -SIGUSR1 $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart configuration with rate limiting
 Restart=always
 RestartSec=5
-KillMode=process
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Environment variables
 Environment="HOME={{ home_dir }}"
 Environment="PATH={{ systemd_environment.PATH }}"
 Environment=CLAWDBOT_GATEWAY_PORT={{ systemd_environment.CLAWDBOT_GATEWAY_PORT }}
@@ -16,6 +28,12 @@ Environment="CLAWDBOT_SYSTEMD_UNIT={{ systemd_environment.CLAWDBOT_SYSTEMD_UNIT 
 Environment=CLAWDBOT_SERVICE_MARKER={{ systemd_environment.CLAWDBOT_SERVICE_MARKER }}
 Environment=CLAWDBOT_SERVICE_KIND={{ systemd_environment.CLAWDBOT_SERVICE_KIND }}
 Environment=CLAWDBOT_SERVICE_VERSION={{ systemd_environment.CLAWDBOT_SERVICE_VERSION }}
+
+# Pre-start: Cleanup browser processes that might block WhatsApp
+ExecStartPre=-/bin/bash -c 'echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Pre-start cleanup initiated" >> {{ clawdbot_workspace | expanduser }}/service.log && timeout 10 pkill -f "chrome.*whatsapp\|chromium.*whatsapp" 2>/dev/null || true'
+
+# Post-stop: Deep cleanup of orphaned processes
+ExecStopPost=-/bin/bash -c 'echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Post-stop cleanup initiated" >> {{ clawdbot_workspace | expanduser }}/service.log && sleep 2 && timeout 15 pkill -9 -f "chrome.*clawdbot\|chromium.*clawdbot" 2>/dev/null || true && timeout 15 pkill -9 -f "clawdbot.*gateway" 2>/dev/null || true'
 
 [Install]
 WantedBy=default.target

@@ -13,6 +13,27 @@
     owner: "{{ clawdbot_user }}"
     mode: "0755"
 
+- name: Template health check script
+  template:
+    src: "health_check.sh.j2"
+    dest: "{{ monitor_script_dest | dirname | expanduser }}/health_check.sh"
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Template deploy script
+  template:
+    src: "deploy.sh.j2"
+    dest: "{{ monitor_script_dest | dirname | expanduser }}/deploy.sh"
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
+- name: Ensure backup directory exists
+  file:
+    path: "{{ clawdbot_workspace | expanduser }}/backups"
+    state: directory
+    owner: "{{ clawdbot_user }}"
+    mode: "0755"
+
 - name: Add cron job for monitor script
   cron:
     name: "Monitor Clawdbot and WhatsApp"
@@ -21,13 +42,20 @@
     day: "{{ cron_schedule.split(' ')[2] }}"
     month: "{{ cron_schedule.split(' ')[3] }}"
     weekday: "{{ cron_schedule.split(' ')[4] }}"
-    user: "{{ node_user }}"
+    user: "{{ clawdbot_user }}"
     job: "bash {{ monitor_script_dest | expanduser }} > /dev/null 2>&1"
     state: present
 
 - name: Ensure monitor log file exists
   file:
     path: "{{ monitor_log_file | expanduser }}"
+    state: touch
+    owner: "{{ clawdbot_user }}"
+    mode: "0644"
+
+- name: Ensure service log file exists
+  file:
+    path: "{{ clawdbot_workspace | expanduser }}/service.log"
     state: touch
     owner: "{{ clawdbot_user }}"
     mode: "0644"
